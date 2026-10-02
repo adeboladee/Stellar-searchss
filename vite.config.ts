@@ -1,11 +1,46 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
+import { visualizer } from 'rollup-plugin-visualizer'
+
+const analyze = process.env.ANALYZE === '1'
+
+// Read version from package.json at build time so the frontend bundle always
+// reflects the version without an extra runtime fetch.
+const { version } = JSON.parse(
+  readFileSync(resolve(__dirname, 'package.json'), 'utf-8'),
+)
 
 export default defineConfig({
-  plugins: [react()],
+test: {
+    environment: 'node',
+    globals: true,
+    include: ['**/*.{test,spec}.{ts,tsx,js,jsx}'],
+    environmentMatchGlobs: [
+      ['**/*.dom.{test,spec}.{ts,tsx,js,jsx}', 'jsdom'],
+      ['src/**/*.{test,spec}.{ts,tsx,js,jsx}', 'jsdom'],
+    ],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+    },
+  },
+  plugins: [
+    react(),
+    analyze &&
+      visualizer({
+        filename: 'dist/stats.html',
+        gazzle: true,
+        broli: true,
+        template: 'trememap',
+      }),
+  ],
   // Required for @stellar/stellar-sdk and @stellar/freighter-api in browser
   define: {
     global: 'globalThis',
+    // Exposed as __APP_VERSION__ in all frontend source files.
+    __APP_VERSION__: JSON.stringify(version),
   },
   resolve: {
     alias: {
@@ -18,6 +53,30 @@ export default defineConfig({
     esbuildOptions: {
       define: {
         global: 'globalThis',
+      },
+    },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id) return
+          if (id.includes('node_modules')) {
+            if (id.match(/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/)) {
+              return 'vendor-react'
+            }
+            if (id.includes('node_modules/framer-motion')) {
+              return 'vendor-framer-motion'
+            }
+            if (id.includes('node_modules/lucide-react')) {
+              return 'vendor-lucide'
+            }
+            if (id.includes('node_modules/@stellar')) {
+              return 'vendor-stellar'
+            }
+            return 'vendor'
+          }
+        },
       },
     },
   },
@@ -39,4 +98,7 @@ export default defineConfig({
       },
     },
   },
+  // Vitest configuration lives in vitest.config.ts, which takes precedence over
+  // this file. Keeping it there lets server tests run in the node environment
+  // while component tests run in jsdom within a single `npm test` invocation.
 })
