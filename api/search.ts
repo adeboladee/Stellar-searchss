@@ -4,14 +4,24 @@ import {
   USDC_CONTRACT, 
   AMOUNT_STROOPS,
   AMOUNT_USDC
-} from '../src/lib/constants'
+} from '../shared/constants.js'
+import {
+  buildErrorResponse,
+  buildUpstreamUnavailableResponse,
+  resolveRequestId,
+} from '../src/lib/apiError'
+import { incrementCounter } from '../src/lib/stats'
 
 // ─── Config ───────────────────────────────────────────────────────────────
-const RECEIVING_ADDRESS = process.env.STELLAR_RECEIVING_ADDRESS!
-const NETWORK           = STELLAR_NETWORK as 'stellar:testnet' | 'stellar:mainnet'
-const SERPER_API_KEY    = process.env.SERPER_API_KEY!
+export const RECEIVING_ADDRESS = process.env.STELLAR_RECEIVING_ADDRESS!
+export const NETWORK           = STELLAR_NETWORK as 'stellar:testnet' | 'stellar:mainnet'
+export const SERPER_API_KEY    = process.env.SERPER_API_KEY!
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+// Local load tests may skip payment; production always retains the payment gate.
+const PAYMENTS_DISABLED = process.env.NODE_ENV === 'development' &&
+  process.env.VERCEL_ENV !== 'production' && process.env.PAYMENTS_DISABLED === 'true'
+
+export async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ─── CORS ─────────────────────────────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -27,22 +37,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Expose-Headers', [
     'PAYMENT-REQUIRED',
     'X-Payment-Response',
+    'X-Request-Id',
   ].join(', '))
 
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'GET')    return res.status(405).json({ error: 'Method not allowed' })
 
+  // Correlation token echoed to the client and attached to server-side logs.
+  const requestId = resolveRequestId(req.headers['x-request-id'])
+  res.setHeader('X-Request-Id', requestId)
+
   const { q, count = '5', freshness } = req.query as Record<string, string>
 
-  if (!q?.trim()) return res.status(400).json({ error: 'Missing required parameter: q' })
-
   // ─── Payment check ────────────────────────────────────────────────────────
+  // Ordering matters for parity with server/index.ts: there the x402 guard is
+  // middleware, so it answers 402 before the route handler ever validates `q`.
+  // Validating `q` first here would return 400 where Express returns 402.
   const paymentHeader =
     req.headers['payment-signature'] ||
     req.headers['x-payment']         ||
     req.headers['X-PAYMENT']
 
-  if (!paymentHeader) {
+  if (!paymentHeader && !PAYMENTS_DISABLED) {
     // Return x402 v2 payment requirements
     // The key fix: asset must be a Soroban C... contract address, NOT "USDC:ISSUER"
     const paymentRequired = {
@@ -73,8 +89,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(402).json({ error: 'Payment required' })
   }
 
+  if (!q?.trim()) return res.status(400).json({ error: 'Missing required parameter: q' })
+
   // ─── Payment present — proceed with search ────────────────────────────────
-  console.log('✅ Payment header received')
+  if (paymentHeader) console.log('✅ Payment header received')
+  else console.log('⚠️  PAYMENTS_DISABLED — bypassing payment gate (load test mode)')
 
   let txHash: string | null = null
   try {
@@ -114,8 +133,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!serperRes.ok) {
       const errText = await serperRes.text()
-      console.error('[serper]', serperRes.status, errText)
-      return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
+      const failure = buildUpstreamUnavailableResponse({
+        error: new Error(`Serper.dev responded ${serperRes.status}: ${errText}`),
+        requestId,
+        operation: 'serper.search',
+        provider: 'serper',
+        publicMessage: 'Search is temporarily unavailable. Please try again shortly.',
+        meta: { status: serperRes.status, responseBody: errText.slice(0, 2000) },
+      })
+      return res.status(failure.status).json(failure.body)
     }
 
     const data      = await serperRes.json()
@@ -134,6 +160,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       publishedAt:    r.date || undefined,
     }))
 
+    // Record successful search for stats. Best-effort: never block the response.
+    incrementCounter('searches').catch(() => {})
+    incrementCounter('results', results.length).catch(() => {})
+
     return res.json({
       query:      q.trim(),
       results,
@@ -145,8 +175,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       latencyMs,
     })
 
-  } catch (err: any) {
-    console.error('[search error]', err.message)
-    return res.status(500).json({ error: 'Search failed.' })
+  } catch (err: unknown) {
+    const failure = buildErrorResponse({
+      error: err,
+      requestId,
+      operation: 'search',
+      provider: 'internal',
+      publicMessage: 'Search failed. Please try again later.',
+      code: 'search_failed',
+      status: 500,
+    })
+    return res.status(failure.status).json(failure.body)
   }
 }
+
+export default handler
