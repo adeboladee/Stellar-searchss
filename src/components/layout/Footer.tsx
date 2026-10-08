@@ -1,5 +1,9 @@
-import { Zap } from 'lucide-react'
 import { STELLAR_EXPERT_URL, IS_MAINNET } from '../../lib/stellar'
+import { Zap } from 'lucide-react'
+import { ExternalLink } from '../ui/ExternalLink'
+
+// Injected by Vite at build time from package.json → version.
+declare const __APP_VERSION__: string
 
 const LINKS = [
   { label: 'x402.org',         href: 'https://x402.org' },
@@ -10,7 +14,7 @@ const LINKS = [
 
 export function Footer() {
   return (
-    <footer className="border-t border-white/4 py-5">
+    <footer className="border-t border-white/5 py-5">
       <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <div
@@ -20,20 +24,29 @@ export function Footer() {
             <Zap className="w-2.5 h-2.5 text-neon-cyan" />
           </div>
           <span className="font-display text-xs text-white/20">
-            STELLARSEARCH · Stellar Hackathon 2026
+            STELLARSEARCH &#183; Stellar Hackathon 2026
+          </span>
+          <span
+            className="font-mono text-xs px-1.5 py-0.5 rounded"
+            style={{
+              background: 'rgba(0,245,255,0.07)',
+              border: '1px solid rgba(0,245,255,0.15)',
+              color: 'rgba(0,245,255,0.4)',
+            }}
+            title="API version"
+          >
+            v{__APP_VERSION__}
           </span>
         </div>
         <div className="flex items-center gap-5">
           {LINKS.map(({ label, href }) => (
-            <a
+            <ExternalLink
               key={label}
               href={href}
-              target="_blank"
-              rel="noopener noreferrer"
               className="font-display text-xs text-white/20 hover:text-neon-cyan/60 transition-colors hidden sm:inline"
             >
               {label}
-            </a>
+            </ExternalLink>
           ))}
         </div>
       </div>
