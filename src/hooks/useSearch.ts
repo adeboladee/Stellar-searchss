@@ -10,7 +10,8 @@
  * Fix: convert Buffer → base64 string using Buffer.from(result).toString('base64')
  */
 
-import { useState, useCallback }              from 'react'
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { useState, useCallback, createElement }              from 'react'
 import { toast }                               from 'sonner'
 import { x402Client, x402HTTPClient }          from '@x402/fetch'
 import { ExactStellarScheme }                  from '@x402/stellar/exact/client'
@@ -18,6 +19,7 @@ import { signAuthEntry, getNetworkDetails }    from '@stellar/freighter-api'
 import { Networks }                            from '@stellar/stellar-sdk'
 import { Buffer }                              from 'buffer'
 import { HORIZON_URL, IS_MAINNET, EXPECTED_WALLET_NETWORK, explorerTxUrl } from '../lib/stellar'
+import { RECEIPTS_STORAGE_KEY, isSearchQueryStorageEnabled } from '../lib/searchPrivacy'
 
 const SERVER_URL = (import.meta as any).env?.VITE_SERVER_URL ?? (
   typeof window !== 'undefined' && window.location.origin.includes('vercel.app') 
@@ -25,6 +27,7 @@ const SERVER_URL = (import.meta as any).env?.VITE_SERVER_URL ?? (
     : 'http://localhost:3001'
 )
 
+export const __test__ = { SERVER_URL }
 // Soroban RPC URLs
 const SOROBAN_RPC_TESTNET = 'https://soroban-testnet.stellar.org'
 const SOROBAN_RPC_MAINNET = 'https://soroban-rpc.mainnet.stellar.org' // Or another public RPC
@@ -62,20 +65,37 @@ export interface SearchSession {
   error?: string
   durationMs?: number
   suggestions: string[]
+  isLoadingSuggestions?: boolean
 }
 
 export function useSearch(walletAddress: string | null = null) {
   const [session, setSession] = useState<SearchSession>({
-    query: '', results: [], txHash: null, paidAmount: null, status: 'idle', suggestions: [],
+    query: '', results: [], txHash: null, paidAmount: null, status: 'idle', suggestions: [], isLoadingSuggestions: false,
   })
 
   const search = useCallback(async (query: string, count = 5) => {
     if (!query.trim()) return
 
-    setSession({ query, results: [], txHash: null, paidAmount: null, status: 'searching', step: 1, suggestions: [] })
+    setSession({ query, results: [], txHash: null, paidAmount: null, status: 'searching', step: 1, suggestions: [], isLoadingSuggestions: false })
 
     const t0     = Date.now()
-    const params = new URLSearchParams({ q: query, count: String(count), suggestions: '1' })
+    const params = new URLSearchParams({ q: query, count: String(count) })
+
+    const fetchAsyncSuggestions = (q: string) => {
+      fetch(`${SERVER_URL}/suggestions?q=${encodeURIComponent(q)}`)
+        .then(res => (res.ok ? res.json() : null))
+        .then(suggData => {
+          setSession(prev => (prev.query === q ? {
+            ...prev,
+            suggestions: suggData?.suggestions || [],
+            isLoadingSuggestions: false,
+          } : prev))
+        })
+        .catch(err => {
+          console.warn('[suggestions] Async fetch error:', err)
+          setSession(prev => (prev.query === q ? { ...prev, isLoadingSuggestions: false } : prev))
+        })
+    }
 
     const advance = (step: PaymentStep) =>
       setSession(prev => ({ ...prev, step }))
@@ -140,10 +160,13 @@ export function useSearch(walletAddress: string | null = null) {
       if (firstRes.status !== 402) {
         if (!firstRes.ok) throw new Error(`Server error ${firstRes.status}`)
         const data = await firstRes.json()
-        return setSession({
+        setSession({
           query, results: data.results ?? [], txHash: null,
           paidAmount: null, status: 'complete', step: 6, durationMs: Date.now() - t0, suggestions: data.suggestions ?? [],
+          isLoadingSuggestions: true,
         })
+        fetchAsyncSuggestions(query)
+        return
       }
 
       // Flow step 2 — parse the PAYMENT-REQUIRED header
@@ -193,27 +216,34 @@ export function useSearch(walletAddress: string | null = null) {
         step:        6,
         durationMs:  Date.now() - t0,
         suggestions: data.suggestions ?? [],
+        isLoadingSuggestions: true,
       })
+      fetchAsyncSuggestions(query)
 
       if (data.txHash) {
-        toast.success(`Payment settled: ${data.paidAmount || '0.001'} USDC`, {
-          description: 'View transaction on Stellar network',
-          action: {
-            label: 'Explorer',
-            onClick: () => window.open(explorerTxUrl(data.txHash), '_blank')
+        toast.success(
+          createElement('div', { role: 'status', 'aria-live': 'polite' }, 
+            `Payment settled: ${data.paidAmount || '0.001'} USDC`
+          ), 
+          {
+            description: 'View transaction on Stellar network',
+            action: {
+              label: 'Explorer',
+              onClick: () => window.open(explorerTxUrl(data.txHash), '_blank')
+            }
           }
-        })
+        )
       }
 
       // Persist receipt
       if (data.txHash) {
         try {
-          const receiptsRaw = localStorage.getItem('stellarsearch_receipts')
+          const receiptsRaw = localStorage.getItem(RECEIPTS_STORAGE_KEY)
           const receipts: SearchReceipt[] = receiptsRaw ? JSON.parse(receiptsRaw) : []
           
           const newReceipt: SearchReceipt = {
             txHash: data.txHash,
-            query: query.trim(),
+            query: isSearchQueryStorageEnabled() ? query.trim() : '',
             amount: data.paidAmount || '0.001',
             timestamp: new Date().toISOString(),
             network: data.network || 'stellar:testnet',
@@ -221,7 +251,7 @@ export function useSearch(walletAddress: string | null = null) {
 
           // Keep only last 50 receipts
           const updated = [newReceipt, ...receipts].slice(0, 50)
-          localStorage.setItem('stellarsearch_receipts', JSON.stringify(updated))
+          localStorage.setItem(RECEIPTS_STORAGE_KEY, JSON.stringify(updated))
           console.log('📄 Receipt persisted')
         } catch (e) {
           console.warn('Failed to persist receipt:', e)
@@ -231,7 +261,10 @@ export function useSearch(walletAddress: string | null = null) {
     } catch (err: any) {
       console.error('❌ Search failed:', err)
       const msg = err.message || 'Search failed.'
-      toast.error('Search Payment Failed', { description: msg })
+      toast.error(
+        createElement('div', { role: 'alert', 'aria-live': 'assertive' }, 'Search Payment Failed'),
+        { description: msg }
+      )
       setSession(prev => ({
         ...prev,
         status: 'error',
@@ -244,5 +277,10 @@ export function useSearch(walletAddress: string | null = null) {
     setSession({ query: '', results: [], txHash: null, paidAmount: null, status: 'idle', suggestions: [] })
   }, [])
 
-  return { session, search, reset }
+  const retry = useCallback(() => {
+    if (session.query) return search(session.query)
+    return Promise.resolve()
+  }, [search, session.query])
+
+  return { session, search, reset, retry }
 }

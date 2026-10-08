@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { m, AnimatePresence, LazyMotion, domAnimation } from 'framer-motion'
 import { Bot, Send, X } from 'lucide-react'
 import type { SearchResult } from '../../hooks/useSearch'
 
@@ -100,10 +100,65 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
   const [loading, setLoading]   = useState(false)
   const bottomRef               = useRef<HTMLDivElement>(null)
   const contextInjectedFor      = useRef<string | null>(null)
+  const panelRef                = useRef<HTMLDivElement>(null)
+  const triggerRef              = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // The panel is a modal dialog: move focus into it on open, keep Tab inside it,
+  // close on Escape, and hand focus back to the trigger when it closes.
+  useEffect(() => {
+    if (!open) return
+    const panel = panelRef.current
+    if (!panel) return
+
+    panel.focus()
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setOpen(false)
+        return
+      }
+      if (e.key !== 'Tab') return
+
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      if (!focusable.length) {
+        e.preventDefault()
+        panel.focus()
+        return
+      }
+
+      const first  = focusable[0]
+      const last   = focusable[focusable.length - 1]
+      const active = document.activeElement
+      const inside = panel.contains(active)
+
+      if (e.shiftKey) {
+        // Wrap backwards from the first control (or from the panel itself).
+        if (!inside || active === first || active === panel) {
+          e.preventDefault()
+          last.focus()
+        }
+      } else if (!inside || active === last) {
+        // Wrap forwards from the last control.
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      triggerRef.current?.focus()
+    }
+  }, [open])
 
   // Inject a search-context system message the first time the assistant is
   // opened after a search completes. Re-inject if the query changes.
@@ -176,9 +231,9 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
   }
 
   return (
-    <>
+    <LazyMotion features={domAnimation} strict>
       {/* Floating button */}
-      <motion.button
+      <m.button
         onClick={() => setOpen(true)}
         className="fixed bottom-6 right-6 z-40 w-12 h-12 rounded-full flex items-center justify-center"
         style={{ background: 'rgba(0,245,255,0.15)', border: '1px solid rgba(0,245,255,0.4)' }}
@@ -194,16 +249,16 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
         transition={{ duration: 2, repeat: Infinity }}
       >
         <Bot className="w-5 h-5 text-neon-cyan" />
-      </motion.button>
+      </m.button>
 
       {/* Chat panel */}
       <AnimatePresence>
         {open && (
-          <motion.div
+          <m.div
             initial={{ opacity: 0, y: 20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            className="fixed bottom-20 right-6 z-40 w-80 rounded-2xl overflow-hidden flex flex-col"
+            className="fixed bottom-20 right-6 z-40 w-80 rounded-2xl overflow-hidden flex flex-col outline-none"
             style={{
               height: '420px',
               background: 'rgba(6,13,20,0.96)',
@@ -229,7 +284,7 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
               {messages.filter(m => m.role !== 'system').map((msg, i) => (
-                <motion.div
+                <m.div
                   key={i}
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -249,14 +304,14 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
                   >
                     {msg.content}
                   </div>
-                </motion.div>
+                </m.div>
               ))}
 
               {loading && (
                 <div className="flex justify-start">
                   <div className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white/5 border border-white/7">
                     {[0, 1, 2].map(j => (
-                      <motion.div
+                      <m.div
                         key={j}
                         className="w-1.5 h-1.5 rounded-full bg-neon-cyan/60"
                         animate={{ opacity: [0.3, 1, 0.3] }}
@@ -295,9 +350,9 @@ export function GroqAssistant({ lastSearch }: Props = {}) {
                 </button>
               </div>
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
-    </>
+    </LazyMotion>
   )
 }
